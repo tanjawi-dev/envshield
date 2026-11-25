@@ -8,7 +8,7 @@ First off, thank you for considering contributing to EnvShield! Contributions fr
 
 1. **Fork and clone the repository:**
    ```bash
-   git clone https://github.com/<your-username>/envshield.git
+   git clone https://github.com/tanjawi-dev/envshield.git
    cd envshield
    ```
 
@@ -38,7 +38,7 @@ If you add a new detection rule or feature, remember to add corresponding test c
 
 ## 📐 Design Principles
 
-- **Zero External Dependencies:** EnvShield must run exclusively using the Python standard library. Do not add external third-party dependencies to `pyproject.toml`.
+- **Zero External Runtime Dependencies:** EnvShield must run exclusively using the Python standard library. Do not add external third-party dependencies to runtime dependencies.
 - **Fast Execution:** File scanning and regex matching should remain lightweight and high-speed.
 - **Privacy & Safety:** Never log or display plain-text credentials in outputs; always use `mask_secret()`.
 
