@@ -51,6 +51,25 @@ class TestCLI(unittest.TestCase):
         self.assertTrue(payload["summary"]["clean"])
         self.assertEqual(payload["summary"]["findings_count"], 0)
 
+    def test_cli_json_output_masks_secret(self):
+        raw_token = "ghp_123456789012345678901234567890123456"
+        leak_file = self.base_path / "secret.js"
+        leak_file.write_text(f'const token = "{raw_token}";\n', encoding="utf-8")
+
+        captured_stdout = io.StringIO()
+        with patch("sys.stdout", captured_stdout):
+            exit_code = main(["scan", str(self.base_path), "--format", "json", "--exit-zero"])
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(captured_stdout.getvalue())
+        self.assertEqual(len(payload["findings"]), 1)
+        finding = payload["findings"][0]
+
+        # Verify raw secret is never present in JSON output
+        self.assertNotIn(raw_token, captured_stdout.getvalue())
+        self.assertIn("ghp_****3456", finding["masked_secret"])
+        self.assertIn("ghp_****3456", finding["snippet"])
+
 
 if __name__ == "__main__":
     unittest.main()
