@@ -24,7 +24,7 @@ EnvShield scans your codebase for exposed credentials, API keys, private certifi
 Clone the repository and install locally:
 
 ```bash
-git clone https://github.com/trygemini979-ai/envshield.git
+git clone https://github.com/tanjawi-dev/envshield.git
 cd envshield
 pip install -e .
 ```

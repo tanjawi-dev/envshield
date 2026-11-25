@@ -30,8 +30,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/trygemini979-ai/envshield"
-Issues = "https://github.com/trygemini979-ai/envshield/issues"
+Homepage = "https://github.com/tanjawi-dev/envshield"
+Issues = "https://github.com/tanjawi-dev/envshield/issues"
 
 [project.scripts]
 envshield = "envshield.cli:main"
