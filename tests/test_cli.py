@@ -23,6 +23,20 @@ class TestCLI(unittest.TestCase):
         exit_code = main(["scan", str(self.base_path), "--no-color"])
         self.assertEqual(exit_code, 0)
 
+    def test_cli_check_command_alias(self):
+        clean_file = self.base_path / "app.py"
+        clean_file.write_text('print("Clean")\n', encoding="utf-8")
+
+        exit_code = main(["check", str(self.base_path), "--no-color"])
+        self.assertEqual(exit_code, 0)
+
+    def test_cli_version_command(self):
+        captured_stdout = io.StringIO()
+        with patch("sys.stdout", captured_stdout):
+            exit_code = main(["version"])
+        self.assertEqual(exit_code, 0)
+        self.assertIn("envshield", captured_stdout.getvalue())
+
     def test_cli_secret_detected_exit_1(self):
         leak_file = self.base_path / "leak.py"
         leak_file.write_text('KEY = "AIzaSyD-1234567890123456789012345678901"\n', encoding="utf-8")
@@ -37,19 +51,19 @@ class TestCLI(unittest.TestCase):
         exit_code = main(["scan", str(self.base_path), "--exit-zero", "--no-color"])
         self.assertEqual(exit_code, 0)
 
-    def test_cli_json_output(self):
-        clean_file = self.base_path / "index.js"
-        clean_file.write_text('console.log("secure");\n', encoding="utf-8")
+    def test_cli_quiet_mode(self):
+        leak_file = self.base_path / "leak.py"
+        leak_file.write_text('KEY = "AIzaSyD-1234567890123456789012345678901"\n', encoding="utf-8")
 
         captured_stdout = io.StringIO()
         with patch("sys.stdout", captured_stdout):
-            exit_code = main(["scan", str(self.base_path), "--format", "json"])
+            exit_code = main(["scan", str(self.base_path), "--quiet", "--no-color"])
 
-        self.assertEqual(exit_code, 0)
-        output_str = captured_stdout.getvalue()
-        payload = json.loads(output_str)
-        self.assertTrue(payload["summary"]["clean"])
-        self.assertEqual(payload["summary"]["findings_count"], 0)
+        self.assertEqual(exit_code, 1)
+        output = captured_stdout.getvalue()
+        # Should not have the full verbose banner
+        self.assertNotIn("Location: leak.py", output)
+        self.assertIn("Security violations detected", output)
 
     def test_cli_json_output_masks_secret(self):
         raw_token = "ghp_123456789012345678901234567890123456"
@@ -65,10 +79,15 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(len(payload["findings"]), 1)
         finding = payload["findings"][0]
 
-        # Verify raw secret is never present in JSON output
         self.assertNotIn(raw_token, captured_stdout.getvalue())
         self.assertIn("ghp_****3456", finding["masked_secret"])
         self.assertIn("ghp_****3456", finding["snippet"])
+
+    def test_cli_missing_path_returns_exit_2(self):
+        captured_stderr = io.StringIO()
+        with patch("sys.stderr", captured_stderr):
+            exit_code = main(["scan", "/non/existent/path/for/envshield/test"])
+        self.assertEqual(exit_code, 2)
 
 
 if __name__ == "__main__":

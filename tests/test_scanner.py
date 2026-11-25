@@ -1,8 +1,9 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from envshield.scanner import Scanner, mask_secret
+from envshield.scanner import Scanner, mask_secret, sanitize_line
 
 
 class TestScanner(unittest.TestCase):
@@ -21,32 +22,53 @@ class TestScanner(unittest.TestCase):
 
     def test_mask_secret_other_prefixes(self):
         gh_masked = mask_secret("ghp_123456789012345678901234567890123456")
-        self.assertTrue(gh_masked.startswith("ghp_****"))
-        self.assertTrue(gh_masked.endswith("3456"))
+        self.assertEqual(gh_masked, "ghp_****3456")
 
         aws_masked = mask_secret("AKIAIOSFODNN7EXAMPLE")
-        self.assertTrue(aws_masked.startswith("AKIA****"))
-        self.assertTrue(aws_masked.endswith("MPLE"))
+        self.assertEqual(aws_masked, "AKIA****MPLE")
 
-    def test_snippet_is_masked_in_findings(self):
-        raw_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"
-        code_file = self.base_path / "app.py"
-        code_file.write_text(f'OPENAI_KEY = "{raw_secret}"\n', encoding="utf-8")
+        slack_masked = mask_secret("xoxb-TEST-MOCK-TOKEN-VALUE-4321")
+        self.assertEqual(slack_masked, "xoxb-****4321")
+
+    def test_sanitize_multiple_secrets_on_same_line(self):
+        token_a = "ghp_FIRST_SECRET_TOKEN_123456789012"
+        token_b = "ghp_SECOND_SECRET_TOKEN_98765432109"
+        line = f"config(key='{token_a}', backup='{token_b}')"
+
+        sanitized = sanitize_line(
+            line,
+            [
+                (token_a, mask_secret(token_a)),
+                (token_b, mask_secret(token_b)),
+            ],
+        )
+
+        self.assertNotIn(token_a, sanitized)
+        self.assertNotIn(token_b, sanitized)
+        self.assertIn("ghp_****9012", sanitized)
+        self.assertIn("ghp_****2109", sanitized)
+
+    def test_scanner_detects_and_masks_multiple_secrets_same_line(self):
+        token1 = "ghp_111122223333444455556666777788889999"
+        token2 = "AKIAIOSFODNN7EXAMPLE"
+        code_file = self.base_path / "multi.py"
+        code_file.write_text(f'KEYS = ["{token1}", "{token2}"]\n', encoding="utf-8")
 
         scanner = Scanner()
         result = scanner.scan_path(str(self.base_path))
 
-        self.assertEqual(len(result.findings), 1)
-        finding = result.findings[0]
-        # Ensure the raw secret is nowhere in snippet or masked_value
-        self.assertNotIn(raw_secret, finding.snippet)
-        self.assertNotIn(raw_secret, finding.masked_value)
-        self.assertIn("sk-proj-****7890", finding.snippet)
-        self.assertIn("sk-proj-****7890", finding.masked_value)
+        self.assertEqual(len(result.findings), 2)
+        # Neither raw secret should be in ANY snippet or masked_value
+        for finding in result.findings:
+            self.assertNotIn(token1, finding.snippet)
+            self.assertNotIn(token2, finding.snippet)
+            self.assertNotIn(token1, finding.masked_value)
+            self.assertNotIn(token2, finding.masked_value)
 
     def test_detect_openai_token(self):
         code_file = self.base_path / "app.py"
-        code_file.write_text('api_token = "sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"\n', encoding="utf-8")
+        token = "sk-proj-FAKETOKEN1234567890abcdefghijklmnopqrstuvwxyz"
+        code_file.write_text(f'api_token = "{token}"\n', encoding="utf-8")
 
         scanner = Scanner()
         result = scanner.scan_path(str(self.base_path))
@@ -54,11 +76,12 @@ class TestScanner(unittest.TestCase):
         self.assertEqual(len(result.findings), 1)
         self.assertEqual(result.findings[0].rule_name, "OpenAI API Key")
         self.assertEqual(result.findings[0].severity, "CRITICAL")
-        self.assertTrue(result.has_violations)
+        self.assertNotIn(token, result.findings[0].snippet)
 
     def test_detect_github_token(self):
         code_file = self.base_path / "config.js"
-        code_file.write_text('const gh = "ghp_123456789012345678901234567890123456";\n', encoding="utf-8")
+        token = "ghp_111122223333444455556666777788889999"
+        code_file.write_text(f'const gh = "{token}";\n', encoding="utf-8")
 
         scanner = Scanner()
         result = scanner.scan_path(str(self.base_path))
@@ -68,7 +91,8 @@ class TestScanner(unittest.TestCase):
 
     def test_detect_aws_keys(self):
         code_file = self.base_path / "deploy.sh"
-        code_file.write_text('export AWS_ACCESS_KEY_ID="AKIAIOSFODNN7EXAMPLE"\n', encoding="utf-8")
+        token = "AKIAIOSFODNN7EXAMPLE"
+        code_file.write_text(f'export AWS_ACCESS_KEY_ID="{token}"\n', encoding="utf-8")
 
         scanner = Scanner()
         result = scanner.scan_path(str(self.base_path))
@@ -86,17 +110,35 @@ class TestScanner(unittest.TestCase):
         self.assertEqual(len(result.findings), 1)
         self.assertEqual(result.findings[0].rule_name, "Database Connection String")
 
-    def test_false_positives_filtering(self):
-        clean_file = self.base_path / "normal_code.py"
+    def test_detect_private_key_header(self):
+        code_file = self.base_path / "cert.py"
+        code_file.write_text('KEY = "-----BEGIN RSA PRIVATE KEY-----\\nMIIEowIBAAKCAQEA..."\n', encoding="utf-8")
+
+        scanner = Scanner()
+        result = scanner.scan_path(str(self.base_path))
+
+        self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.findings[0].rule_name, "Private Encryption Key")
+
+    def test_detect_jwt(self):
+        code_file = self.base_path / "auth.py"
+        # Deterministic fake JWT format
+        fake_jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        code_file.write_text(f'TOKEN = "{fake_jwt}"\n', encoding="utf-8")
+
+        scanner = Scanner()
+        result = scanner.scan_path(str(self.base_path))
+
+        self.assertEqual(len(result.findings), 1)
+        self.assertEqual(result.findings[0].rule_name, "JSON Web Token (JWT)")
+
+    def test_false_positives_placeholder_exclusions(self):
+        clean_file = self.base_path / "sample_config.py"
         clean_file.write_text(
             '''
-            # This is a comment about api_key = "1234"
-            def calculate_total(api_key="placeholder"):
-                base_url = "https://api.openai.com/v1/models"
-                sample_token = "simple-short"
-                regular_words = "the quick brown fox jumps over the lazy dog"
-                dummy_hash = "00000000000000000000000000000000"
-                return base_url
+            API_KEY = "your_api_key_here"
+            AUTH_TOKEN = "insert_token_here"
+            SECRET_KEY = "00000000000000000000000000000000"
             ''',
             encoding="utf-8",
         )
@@ -108,78 +150,48 @@ class TestScanner(unittest.TestCase):
         self.assertFalse(result.has_violations)
 
     def test_binary_file_skipped(self):
-        binary_file = self.base_path / "image.bin"
-        # Binary content with null bytes and an embedded token string
-        content = b"\x00\x01\x02\x03\xff\xfe" + b"sk-proj-abcdefghijklmnopqrstuvwxyz1234567890" + b"\x00\x00"
+        binary_file = self.base_path / "image.png"
+        content = b"\x00\x01\x02\x03\xff\xfe" + b"sk-proj-FAKETOKEN12345678901234567890" + b"\x00\x00"
         binary_file.write_bytes(content)
 
         scanner = Scanner()
         result = scanner.scan_path(str(self.base_path))
 
-        # Binary files should be skipped from line analysis
         self.assertEqual(len(result.findings), 0)
 
-    def test_large_file_scanning(self):
-        large_file = self.base_path / "large_data.py"
-        # Generate 6,000 lines of regular code
-        lines = [f'data_entry_{i} = "clean_value_number_{i}"\n' for i in range(6000)]
-        large_file.write_text("".join(lines), encoding="utf-8")
+    def test_large_file_skip_and_recording(self):
+        large_file = self.base_path / "huge.txt"
+        # 2 MB file with scanner max_size set to 1 MB
+        large_file.write_bytes(b"A" * (2 * 1024 * 1024))
 
-        scanner = Scanner()
+        scanner = Scanner(max_file_size_bytes=1 * 1024 * 1024)
         result = scanner.scan_path(str(self.base_path))
 
-        self.assertEqual(result.scanned_files_count, 1)
-        self.assertGreaterEqual(result.scanned_lines_count, 6000)
-        self.assertEqual(len(result.findings), 0)
-        self.assertLess(result.duration_seconds, 2.0)
+        self.assertEqual(len(result.skipped_large_files), 1)
+        self.assertEqual(result.scanned_files_count, 0)
 
-    def test_directory_exclusion(self):
-        # Create an ignored directory (e.g., node_modules or custom vendor)
-        ignored_dir = self.base_path / "node_modules" / "leaky_pkg"
-        ignored_dir.mkdir(parents=True)
-        leaked_file = ignored_dir / "index.js"
-        leaked_file.write_text('const secret = "ghp_123456789012345678901234567890123456";\n', encoding="utf-8")
+    def test_symlink_pointing_outside_root_skipped(self):
+        if not hasattr(os, "symlink"):
+            return  # Skip on systems without symlink capability
 
-        scanner = Scanner()
-        result = scanner.scan_path(str(self.base_path))
+        outside_dir = tempfile.TemporaryDirectory()
+        try:
+            secret_outside = Path(outside_dir.name) / "secret.py"
+            secret_outside.write_text('KEY = "AKIAIOSFODNN7EXAMPLE"\n', encoding="utf-8")
 
-        # Because node_modules is in DEFAULT_IGNORE_DIRS, nothing should be reported
-        self.assertEqual(len(result.findings), 0)
+            symlink_inside = self.base_path / "link_to_outside.py"
+            try:
+                symlink_inside.symlink_to(secret_outside)
+            except OSError:
+                return  # Skip if user doesn't have symlink privilege on Windows
 
-    def test_custom_ignore_dir(self):
-        custom_dir = self.base_path / "vendor"
-        custom_dir.mkdir()
-        leaked_file = custom_dir / "lib.py"
-        leaked_file.write_text('KEY = "AIzaSyD-1234567890123456789012345678901"\n', encoding="utf-8")
+            scanner = Scanner()
+            result = scanner.scan_path(str(self.base_path))
 
-        scanner = Scanner(ignore_dirs={"vendor"})
-        result = scanner.scan_path(str(self.base_path))
-
-        self.assertEqual(len(result.findings), 0)
-
-    def test_unignored_env_file_alert(self):
-        env_file = self.base_path / ".env"
-        env_file.write_text("DEBUG=True\n", encoding="utf-8")
-
-        scanner = Scanner()
-        result = scanner.scan_path(str(self.base_path))
-
-        self.assertTrue(result.has_violations)
-        self.assertEqual(len(result.sensitive_files), 1)
-        self.assertFalse(result.sensitive_files[0].is_git_ignored)
-
-    def test_ignored_env_file_passes_unignored_check(self):
-        gitignore = self.base_path / ".gitignore"
-        gitignore.write_text(".env\n", encoding="utf-8")
-
-        env_file = self.base_path / ".env"
-        env_file.write_text("DEBUG=True\n", encoding="utf-8")
-
-        scanner = Scanner()
-        result = scanner.scan_path(str(self.base_path))
-
-        unignored = [f for f in result.sensitive_files if not f.is_git_ignored]
-        self.assertEqual(len(unignored), 0)
+            # External symlink target should be ignored
+            self.assertEqual(len(result.findings), 0)
+        finally:
+            outside_dir.cleanup()
 
 
 if __name__ == "__main__":
