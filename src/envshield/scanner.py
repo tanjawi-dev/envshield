@@ -49,6 +49,12 @@ def mask_secret(secret: str) -> str:
     """Masks secret values to protect them from exposure in logs."""
     if len(secret) <= 8:
         return "*" * len(secret)
+
+    # Preserve recognizable token prefix while masking the rest
+    for prefix in ("sk-proj-", "sk_live_", "rk_live_", "sk-", "ghp_", "gho_", "github_pat_", "AKIA", "AIza", "xoxb-", "xoxp-"):
+        if secret.startswith(prefix) and len(secret) > len(prefix) + 4:
+            return f"{prefix}****{secret[-4:]}"
+
     prefix_len = min(4, len(secret) // 4)
     suffix_len = min(4, len(secret) // 4)
     masked_middle = "*" * max(4, len(secret) - prefix_len - suffix_len)
@@ -201,14 +207,16 @@ class Scanner:
                         if rule.entropy_check and not is_high_entropy(secret_value, threshold=self.entropy_threshold):
                             continue
 
+                        masked_secret_val = mask_secret(secret_value)
+                        masked_snippet = line_clean.replace(secret_value, masked_secret_val)[:120]
                         result.findings.append(
                             Finding(
                                 file_path=rel_path,
                                 line_number=line_no,
                                 rule_name=rule.name,
                                 severity=rule.severity,
-                                masked_value=mask_secret(secret_value),
-                                snippet=line_clean[:120],
+                                masked_value=masked_secret_val,
+                                snippet=masked_snippet,
                             )
                         )
         except (OSError, UnicodeDecodeError):
