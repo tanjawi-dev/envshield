@@ -1,0 +1,11 @@
+{
+  "ignore_dirs": [
+    "vendor",
+    "third_party"
+  ],
+  "ignore_patterns": [
+    "*.mock.json",
+    "tests/fixtures/*"
+  ],
+  "entropy_threshold": 4.5
+}
