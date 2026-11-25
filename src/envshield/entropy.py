@@ -26,11 +26,16 @@ def is_high_entropy(data: str, threshold: float = 4.3, min_length: int = 16) -> 
     Determines if a candidate string looks like a high-entropy secret.
     Filters out common low-entropy patterns like repetitions or simple sequences.
     """
-    if len(data) < min_length:
+    if not data or len(data) < min_length:
         return False
 
-    # Skip strings with too many whitespace characters
+    # Skip strings with whitespace characters
     if any(c.isspace() for c in data):
+        return False
+
+    # Check character diversity: a genuine secret should have sufficient unique chars
+    unique_chars = len(set(data))
+    if unique_chars < max(4, min_length // 4):
         return False
 
     entropy = shannon_entropy(data)

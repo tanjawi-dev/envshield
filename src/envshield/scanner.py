@@ -1,15 +1,16 @@
-import fnmatch
 import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Tuple
 
 from envshield.entropy import is_high_entropy
+from envshield.ignore import GitIgnoreManager
 from envshield.rules import (
     DEFAULT_IGNORE_DIRS,
     DEFAULT_IGNORE_EXTENSIONS,
     DEFAULT_RULES,
+    PLACEHOLDER_EXCLUSIONS,
     SENSITIVE_FILE_PATTERNS,
     Rule,
 )
@@ -39,6 +40,8 @@ class ScanResult:
     duration_seconds: float = 0.0
     findings: List[Finding] = field(default_factory=list)
     sensitive_files: List[SensitiveFileAlert] = field(default_factory=list)
+    skipped_large_files: List[str] = field(default_factory=list)
+    skipped_unreadable_files: List[str] = field(default_factory=list)
 
     @property
     def has_violations(self) -> bool:
@@ -46,19 +49,61 @@ class ScanResult:
 
 
 def mask_secret(secret: str) -> str:
-    """Masks secret values to protect them from exposure in logs."""
+    """
+    Masks secret values to protect them from exposure in logs, terminal, and reports.
+    Preserves recognizable prefixes while concealing the bulk of the secret.
+    """
+    if not secret:
+        return ""
     if len(secret) <= 8:
         return "*" * len(secret)
 
-    # Preserve recognizable token prefix while masking the rest
-    for prefix in ("sk-proj-", "sk_live_", "rk_live_", "sk-", "ghp_", "gho_", "github_pat_", "AKIA", "AIza", "xoxb-", "xoxp-"):
+    known_prefixes = (
+        "sk-proj-",
+        "sk-admin-",
+        "sk-svcacct-",
+        "sk_live_",
+        "rk_live_",
+        "pk_live_",
+        "sk-",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "AKIA",
+        "ASIA",
+        "ABIA",
+        "ACCA",
+        "AIza",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxr-",
+        "xoxs-",
+    )
+    for prefix in known_prefixes:
         if secret.startswith(prefix) and len(secret) > len(prefix) + 4:
             return f"{prefix}****{secret[-4:]}"
 
-    prefix_len = min(4, len(secret) // 4)
-    suffix_len = min(4, len(secret) // 4)
-    masked_middle = "*" * max(4, len(secret) - prefix_len - suffix_len)
+    prefix_len = min(4, max(1, len(secret) // 4))
+    suffix_len = min(4, max(1, len(secret) // 4))
+    masked_middle = "****"
     return f"{secret[:prefix_len]}{masked_middle}{secret[-suffix_len:]}"
+
+
+def sanitize_line(line: str, secrets_to_mask: List[Tuple[str, str]]) -> str:
+    """
+    Sanitizes an entire line by replacing all detected raw secrets with their masked counterparts.
+    Sorts by secret length in descending order to prevent substring replacement collisions.
+    """
+    sanitized = line
+    sorted_pairs = sorted(secrets_to_mask, key=lambda pair: len(pair[0]), reverse=True)
+    for raw_sec, masked_sec in sorted_pairs:
+        if raw_sec in sanitized:
+            sanitized = sanitized.replace(raw_sec, masked_sec)
+    return sanitized
 
 
 def is_binary_file(path: Path) -> bool:
@@ -67,36 +112,8 @@ def is_binary_file(path: Path) -> bool:
         with open(path, "rb") as f:
             chunk = f.read(1024)
             return b"\x00" in chunk
-    except OSError:
+    except (OSError, PermissionError):
         return True
-
-
-def load_gitignore_patterns(root_dir: Path) -> List[str]:
-    """Reads .gitignore patterns if available in the directory."""
-    gitignore_file = root_dir / ".gitignore"
-    patterns: List[str] = []
-    if gitignore_file.exists():
-        try:
-            with open(gitignore_file, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        patterns.append(line)
-        except OSError:
-            pass
-    return patterns
-
-
-def is_ignored_by_patterns(relative_path: str, patterns: List[str]) -> bool:
-    """Checks if a path matches any gitignore or custom pattern."""
-    norm_path = relative_path.replace("\\", "/")
-    for pattern in patterns:
-        clean_pat = pattern.rstrip("/")
-        if fnmatch.fnmatch(norm_path, clean_pat) or fnmatch.fnmatch(os.path.basename(norm_path), clean_pat):
-            return True
-        if norm_path.startswith(clean_pat + "/") or fnmatch.fnmatch(norm_path, f"*{clean_pat}*"):
-            return True
-    return False
 
 
 class Scanner:
@@ -106,6 +123,7 @@ class Scanner:
         ignore_dirs: Optional[Set[str]] = None,
         ignore_patterns: Optional[List[str]] = None,
         entropy_threshold: float = 4.3,
+        max_file_size_bytes: int = 10 * 1024 * 1024,  # 10 MB limit
     ):
         self.rules = rules or DEFAULT_RULES
         self.ignore_dirs = set(DEFAULT_IGNORE_DIRS)
@@ -113,6 +131,7 @@ class Scanner:
             self.ignore_dirs.update(ignore_dirs)
         self.ignore_patterns = ignore_patterns or []
         self.entropy_threshold = entropy_threshold
+        self.max_file_size_bytes = max_file_size_bytes
 
     def scan_path(self, target_path: str) -> ScanResult:
         start_time = time.time()
@@ -122,33 +141,49 @@ class Scanner:
         if not path_obj.exists():
             raise FileNotFoundError(f"Path does not exist: {target_path}")
 
-        gitignore_patterns = []
-        if path_obj.is_dir():
-            gitignore_patterns = load_gitignore_patterns(path_obj)
-        elif path_obj.parent.exists():
-            gitignore_patterns = load_gitignore_patterns(path_obj.parent)
-
-        all_ignore_patterns = self.ignore_patterns + gitignore_patterns
+        root_dir = path_obj if path_obj.is_dir() else path_obj.parent
+        gitignore_manager = GitIgnoreManager(
+            root_dir=root_dir,
+            ignore_dirs=self.ignore_dirs,
+            custom_patterns=self.ignore_patterns,
+        )
 
         if path_obj.is_file():
-            self._scan_file(path_obj, path_obj.parent, all_ignore_patterns, result)
+            self._scan_file(path_obj, path_obj.parent, gitignore_manager, result)
         else:
-            self._walk_and_scan(path_obj, all_ignore_patterns, result)
+            self._walk_and_scan(path_obj, gitignore_manager, result)
 
         result.duration_seconds = round(time.time() - start_time, 3)
         return result
 
-    def _walk_and_scan(self, root_dir: Path, ignore_patterns: List[str], result: ScanResult) -> None:
-        for current_root, dirs, files in os.walk(root_dir):
+    def _walk_and_scan(
+        self, root_dir: Path, gitignore_manager: GitIgnoreManager, result: ScanResult
+    ) -> None:
+        resolved_root = root_dir.resolve()
+
+        for current_root, dirs, files in os.walk(resolved_root, followlinks=False):
             current_path = Path(current_root)
 
+            # Prevent descending into symlinked directories outside target root
+            if current_path.is_symlink():
+                try:
+                    if not current_path.resolve().is_relative_to(resolved_root):
+                        dirs[:] = []
+                        continue
+                except (ValueError, OSError):
+                    dirs[:] = []
+                    continue
+
             # Filter out ignored directories in-place to avoid descending
-            dirs[:] = [
-                d
-                for d in dirs
-                if d not in self.ignore_dirs
-                and not is_ignored_by_patterns(str((current_path / d).relative_to(root_dir)), ignore_patterns)
-            ]
+            filtered_dirs = []
+            for d in dirs:
+                dir_path = current_path / d
+                if d in self.ignore_dirs:
+                    continue
+                if gitignore_manager.is_ignored(dir_path, is_dir=True):
+                    continue
+                filtered_dirs.append(d)
+            dirs[:] = filtered_dirs
 
             for file_name in files:
                 file_path = current_path / file_name
@@ -157,20 +192,24 @@ class Scanner:
                 if ext in DEFAULT_IGNORE_EXTENSIONS:
                     continue
 
-                rel_path = str(file_path.relative_to(root_dir))
-                if is_ignored_by_patterns(rel_path, ignore_patterns):
+                if gitignore_manager.is_ignored(file_path, is_dir=False):
                     continue
 
-                self._check_sensitive_filename(file_path, rel_path, ignore_patterns, result)
-                self._scan_file(file_path, root_dir, ignore_patterns, result)
+                self._check_sensitive_filename(file_path, resolved_root, gitignore_manager, result)
+                self._scan_file(file_path, resolved_root, gitignore_manager, result)
 
     def _check_sensitive_filename(
-        self, file_path: Path, rel_path: str, ignore_patterns: List[str], result: ScanResult
+        self, file_path: Path, base_dir: Path, gitignore_manager: GitIgnoreManager, result: ScanResult
     ) -> None:
         filename = file_path.name
         for pattern in SENSITIVE_FILE_PATTERNS:
             if pattern.match(filename):
-                is_ignored = is_ignored_by_patterns(rel_path, ignore_patterns)
+                try:
+                    rel_path = str(file_path.relative_to(base_dir)).replace("\\", "/")
+                except ValueError:
+                    rel_path = str(file_path)
+
+                is_ignored = gitignore_manager.is_ignored(file_path, is_dir=False)
                 result.sensitive_files.append(
                     SensitiveFileAlert(
                         file_path=rel_path,
@@ -181,13 +220,35 @@ class Scanner:
                 break
 
     def _scan_file(
-        self, file_path: Path, base_dir: Path, ignore_patterns: List[str], result: ScanResult
+        self, file_path: Path, base_dir: Path, gitignore_manager: GitIgnoreManager, result: ScanResult
     ) -> None:
+        # Check if symlink points outside base_dir
+        if file_path.is_symlink():
+            try:
+                resolved_target = file_path.resolve()
+                if not resolved_target.is_relative_to(base_dir.resolve()):
+                    return
+            except (ValueError, OSError):
+                return
+
+        # Check file size limit
+        try:
+            stat_info = file_path.stat()
+            if stat_info.st_size > self.max_file_size_bytes:
+                result.skipped_large_files.append(str(file_path))
+                return
+        except (OSError, PermissionError):
+            result.skipped_unreadable_files.append(str(file_path))
+            return
+
         if is_binary_file(file_path):
             return
 
         result.scanned_files_count += 1
-        rel_path = str(file_path.relative_to(base_dir)) if file_path.is_relative_to(base_dir) else str(file_path)
+        try:
+            rel_path = str(file_path.relative_to(base_dir)).replace("\\", "/")
+        except ValueError:
+            rel_path = str(file_path)
 
         try:
             with open(file_path, "r", encoding="utf-8", errors="replace") as f:
@@ -197,27 +258,37 @@ class Scanner:
                     if not line_clean or line_clean.startswith(("#", "//", "/*", "*")):
                         continue
 
+                    # Guard against excessive line length (e.g. minified bundles)
+                    if len(line) > 10000:
+                        line_to_scan = line[:10000]
+                    else:
+                        line_to_scan = line
+
+                    line_matches = []
                     for rule in self.rules:
-                        match = rule.pattern.search(line)
-                        if not match:
-                            continue
+                        for match in rule.pattern.finditer(line_to_scan):
+                            secret_value = match.group(1) if match.groups() else match.group(0)
 
-                        secret_value = match.group(1) if match.groups() else match.group(0)
+                            if rule.entropy_check:
+                                if secret_value.lower() in PLACEHOLDER_EXCLUSIONS:
+                                    continue
+                                if not is_high_entropy(secret_value, threshold=self.entropy_threshold):
+                                    continue
 
-                        if rule.entropy_check and not is_high_entropy(secret_value, threshold=self.entropy_threshold):
-                            continue
+                            line_matches.append((rule, secret_value, mask_secret(secret_value)))
 
-                        masked_secret_val = mask_secret(secret_value)
-                        masked_snippet = line_clean.replace(secret_value, masked_secret_val)[:120]
-                        result.findings.append(
-                            Finding(
-                                file_path=rel_path,
-                                line_number=line_no,
-                                rule_name=rule.name,
-                                severity=rule.severity,
-                                masked_value=masked_secret_val,
-                                snippet=masked_snippet,
+                    if line_matches:
+                        clean_snippet = sanitize_line(line_clean, [(s, m) for _, s, m in line_matches])
+                        for rule, secret_value, masked_val in line_matches:
+                            result.findings.append(
+                                Finding(
+                                    file_path=rel_path,
+                                    line_number=line_no,
+                                    rule_name=rule.name,
+                                    severity=rule.severity,
+                                    masked_value=masked_val,
+                                    snippet=clean_snippet[:120],
+                                )
                             )
-                        )
-        except (OSError, UnicodeDecodeError):
-            pass
+        except (OSError, PermissionError, UnicodeDecodeError):
+            result.skipped_unreadable_files.append(rel_path)
