@@ -1,6 +1,6 @@
 """
-EnvShield - Fast, zero-dependency secret scanner and pre-commit security tool.
+EnvShield - Fast, zero-runtime-dependency secret scanner and pre-commit security tool.
 """
 
-__version__ = "0.1.1"
-__author__ = "Open Source Community"
+__version__ = "0.2.0"
+__author__ = "Tanjawi Dev"

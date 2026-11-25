@@ -23,13 +23,20 @@ def colorize(text: str, color: str, enabled: bool = True) -> str:
 
 
 class Reporter:
-    def __init__(self, use_colors: bool = True):
+    def __init__(self, use_colors: bool = True, quiet: bool = False, verbose: bool = False):
         self.use_colors = use_colors
+        self.quiet = quiet
+        self.verbose = verbose
 
     def print_text_report(self, result: ScanResult, out: Optional[TextIO] = None) -> None:
         if out is None:
             out = sys.stdout
         c = self.use_colors
+
+        if self.quiet:
+            if result.has_violations:
+                out.write(colorize("❌ Security violations detected by EnvShield.\n", TerminalColors.BOLD + TerminalColors.RED, c))
+            return
 
         out.write("\n" + colorize("🛡️  EnvShield Security Scanner", TerminalColors.BOLD + TerminalColors.CYAN, c) + "\n")
         out.write(colorize("=" * 60, TerminalColors.GRAY, c) + "\n\n")
@@ -38,7 +45,7 @@ class Reporter:
         unignored_files = [f for f in result.sensitive_files if not f.is_git_ignored]
         if unignored_files:
             out.write(colorize("⚠️  CRITICAL: Unprotected Sensitive Files Detected", TerminalColors.BOLD + TerminalColors.YELLOW, c) + "\n")
-            out.write(colorize("These files exist on disk but are NOT included in .gitignore:\n", TerminalColors.GRAY, c))
+            out.write(colorize("These files are sensitive and NOT properly ignored:\n", TerminalColors.GRAY, c))
             for alert in unignored_files:
                 out.write(f"  • {colorize(alert.file_path, TerminalColors.RED, c)} ({alert.reason})\n")
             out.write("\n")
@@ -56,6 +63,19 @@ class Reporter:
                 out.write(f"    Pattern:  {finding.masked_value}\n")
                 out.write(f"    Snippet:  {colorize(finding.snippet, TerminalColors.GRAY, c)}\n")
             out.write("\n")
+
+        # Verbose notices (skipped files)
+        if self.verbose:
+            if result.skipped_large_files:
+                out.write(colorize("ℹ️  Skipped Large Files (> size limit):\n", TerminalColors.BLUE, c))
+                for f_path in result.skipped_large_files:
+                    out.write(f"    - {f_path}\n")
+            if result.skipped_unreadable_files:
+                out.write(colorize("ℹ️  Skipped Unreadable Files:\n", TerminalColors.BLUE, c))
+                for f_path in result.skipped_unreadable_files:
+                    out.write(f"    - {f_path}\n")
+            if result.skipped_large_files or result.skipped_unreadable_files:
+                out.write("\n")
 
         # 3. Summary section
         out.write(colorize("-" * 60, TerminalColors.GRAY, c) + "\n")
@@ -83,6 +103,8 @@ class Reporter:
                 "clean": not result.has_violations,
                 "findings_count": len(result.findings),
                 "unignored_sensitive_files_count": len([f for f in result.sensitive_files if not f.is_git_ignored]),
+                "skipped_large_files_count": len(result.skipped_large_files),
+                "skipped_unreadable_files_count": len(result.skipped_unreadable_files),
             },
             "findings": [
                 {
