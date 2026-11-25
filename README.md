@@ -3,7 +3,7 @@
 [![Tests](https://github.com/tanjawi-dev/envshield/actions/workflows/ci.yml/badge.svg)](https://github.com/tanjawi-dev/envshield/actions)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-![Zero Dependencies](https://img.shields.io/badge/dependencies-zero-brightgreen)
+![Zero Runtime Dependencies](https://img.shields.io/badge/runtime%20dependencies-zero-brightgreen)
 
 > Lightweight, high-speed, zero-dependency secret scanner and pre-commit security tool for developers.
 
@@ -28,12 +28,12 @@ These files exist on disk but are NOT included in .gitignore:
   [CRITICAL] OpenAI API Key
     Location: src/config.py:14
     Pattern:  sk-proj-****AbCd
-    Snippet:  OPENAI_API_KEY = "sk-proj-abcdef1234567890abcdef1234567890"
+    Snippet:  OPENAI_API_KEY = "sk-proj-****AbCd"
 
   [HIGH] AWS Access Key ID
     Location: deploy/settings.json:8
-    Pattern:  AKIA****************
-    Snippet:  "access_key": "AKIAIOSFODNN7EXAMPLE"
+    Pattern:  AKIA****MPLE
+    Snippet:  "access_key": "AKIA****MPLE"
 
 ------------------------------------------------------------
 Files Scanned: 42 | Lines Scanned: 1,850 | Time: 0.042s
@@ -44,7 +44,8 @@ Files Scanned: 42 | Lines Scanned: 1,850 | Time: 0.042s
 
 ## ✨ Features
 
-- **⚡ Zero External Dependencies:** Operates exclusively using the Python 3 standard library.
+- **⚡ Zero External Runtime Dependencies:** Operates exclusively using the Python 3 standard library at runtime with no third-party package dependencies. Standard packaging tooling (such as `setuptools`) is used only during optional local package installation.
+- **🔒 Default Secret Masking:** Never exposes raw secrets or leaked tokens in terminal output, snippets, or generated JSON reports.
 - **🔍 20+ Detection Patterns:** Identifies tokens from OpenAI, GitHub, AWS, Google Cloud, Stripe, Slack, JWTs, and database URIs.
 - **🎲 Shannon Entropy Analysis:** Evaluates token randomness to catch custom API keys and secret assignments while minimizing false positives.
 - **📁 Sensitive File Protection:** Detects unignored `.env`, `.pem`, and certificate files that pose security risks.
@@ -55,20 +56,23 @@ Files Scanned: 42 | Lines Scanned: 1,850 | Time: 0.042s
 
 ## 🚀 Quick Start
 
-### Installation
+### Direct Execution (Zero Installation)
 
-Clone the repository and install locally:
+Run directly with any standard Python 3.10+ environment without installing any packages:
 
 ```bash
 git clone https://github.com/tanjawi-dev/envshield.git
 cd envshield
-pip install -e .
+python -m envshield.cli scan .
 ```
 
-Alternatively, run directly with Python:
+### Or Install Locally
+
+Install the CLI command globally or in your virtual environment:
 
 ```bash
-python -m envshield.cli scan .
+pip install -e .
+envshield scan .
 ```
 
 ---
